@@ -1,6 +1,8 @@
 # check_unix_time_sync
 nagios check for NTP time sync on UNIX-like operating systems (AIX, Linux, *BSD, etc)
 
+Supports the following time daemons: ntpd, xntpd, chronyd.  systemctl-timesyncd is not well supported as of March 2019.
+
 This script is executed remotely on a monitored system by the NRPE or check_by_ssh methods available in nagios.
 
 If you are using the check_by_ssh method, you will need a section in the services.cfg
