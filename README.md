@@ -42,5 +42,11 @@ time sync OK  OS=Linux daemon=chronyd  timeserver:0.pool.ntp.org stratum:2 lastu
 
 time sync OK  OS=AIX daemon=ntpd  timeserver:ntp1.example.com stratum:3 lastupdate:562s offset:10.421ms  timeserver:ntp2.example.com stratum:2 lastupdate:386s offset:10.327ms |  offset:10ms;;;;
 
+time sync WARN - time on this machine off by 101 milliseconds from time server ntp1.example.com.  OS=Linux daemon=ntpd  timeserver:ntp1.example.com stratum:3 lastupdate:812s offset:101.260ms |  offset:101ms;;;;
+
+time sync WARN - no sync with time server ntp1.example.com for more than 24 hours.  OS=Linux daemon=ntpd  timeserver:ntp1.example.com stratum:3 lastupdate:86499s offset:12.640ms |  offset:12ms;;;;
+
+time sync WARN - the stratum of time server ntp1.example.com is 12.  This is still a valid stratum, but we prefer to sync against time servers with a stratum between 1 and 5.  Please review output of ntptrace, ntpq -p, or chronyc sources commands.  It may be that a time server we sync against has lowered its stratum because it is becoming less reliable, or it has been unable to sync with an upstream provider for some time.  See if you can get the stratum back down to a lower value. OS=Linux daemon=ntpd  timeserver:ntp1.example.com stratum:12 lastupdate:86499s offset:12.640ms |  offset:12ms;;;;
+
 ```
 
