@@ -7,9 +7,7 @@ If you are using the check_by_ssh method, you will need a section in the service
 file on the nagios server that looks similar to the following.
 This assumes that you already have ssh key pairs configured.
 ```
-   # Define service for checking free space in filesystem
-   # If no thresholds are specified, default to warn=10% critical=5%
-   # Thresholds may be defined in %,K,M,G,P (or combinations thereof)
+   # Define service for checking time synchronization 
    define service{
            use                             generic-24x7-service
            host_name                       unix11
@@ -22,6 +20,7 @@ If you are using the check_nrpe method, you will need a section in the services.
 file on the nagios server that looks similar to the following.
 This assumes that you already have ssh key pairs configured.
 ```
+   # Define service for checking time synchronization 
    define service{
            use                             generic-24x7-service
            host_name                       unix11
