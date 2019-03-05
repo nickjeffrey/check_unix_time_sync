@@ -1,0 +1,771 @@
+#!/usr/bin/perl -w
+
+# FUTURE ENHANCEMENTS
+# -------------------
+#  systemd-timesyncd is not well supported by this script, because "timedatectl timesync-status" 
+#  is not yet supported by Ubuntu 18 / CentOS 7, so we cannot easily capture the stratum and offset.
+ 
+# CHANGE LOG
+# ----------
+#  2018/03/27	njeffrey	Script created
+#  2018/03/28	njeffrey	Add support for xntpd, ntpd, chronyd
+#  2018/05/11	njeffrey	Bug fix - ignore time servers in .XFAC. state
+#  2018/09/23	njeffrey	Bug fix - typo in print_output subroutine
+#  2018/09/23	njeffrey	Bug fix - ignore time servers in .INIT. state
+#  2018/11/15	njeffrey	Bug fix - tweak regex for chronyc
+#  2018/11/20	njeffrey	Add support for systemd-timesyncd
+#  2019/02/28	njeffrey	"ntpq -p -n" failing on AIX.  Change to "ntpq -p -n 127.0.0.1"
+#  2019/03/04	njeffrey	Add $common_output_data and $perf_data variables
+#  2019/03/04	njeffrey	Add nagios performance data to output
+
+
+
+# NOTES
+# -----
+#  This script is intended to be the all-singing all-dancing nagios check for time synchronization
+#  on all UNIX-like operating systems using ntpd, xntpd, or chronyd time daemons.
+#
+#  Tested on AIX 6.1 and 7.1, IBM VIOS (based on AIX 6.1 but config file is at /home/padmin/config/ntp.conf)
+#  Tested on CentOS 7, Ubuntu 16.04 / 17.10 / 18.04, Raspian
+#  Tested on FreeBSD 11
+#  Tested on MacOS 10.12
+#  Not yet tested on OpenBSD, NetBSD, MacOS, SunOS, HP-UX (but is expected to work)
+#
+#
+#  This script is executed remotely on a monitored system by the NRPE or check_by_ssh
+#  methods available in nagios.
+#
+#  If you are using the check_by_ssh method, you will need a section in the services.cfg
+#  file on the nagios server that looks similar to the following.
+#  This assumes that you already have ssh key pairs configured.
+#   # Define service for checking time synchronization
+#   define service{
+#           use                             generic-24x7-service
+#           host_name                       unix11
+#           service_description             time sync
+#           check_command                   check_by_ssh!"/usr/local/nagios/libexec/check_unix_time_sync"
+#           }
+#
+#  If you are using the check_nrpe method, you will need a section in the services.cfg
+#  file on the nagios server that looks similar to the following.
+#  This assumes that you already have ssh key pairs configured.
+#   # Define service for checking time synchronization
+#   define service{
+#           use                             generic-24x7-service
+#           host_name                       unix11
+#           service_description             time sync
+#           check_command                   check_nrpe!check_unix_time_sync -t 30
+#           }
+#
+#  If using NRPE, you will also need a section defining the NRPE command in the /usr/local/nagios/nrpe.cfg file that looks like this:
+#   command[check_unix_time_sync]=/usr/local/nagios/libexec/check_unix_time_sync
+#
+
+
+
+
+# ASSUMPTIONS
+# -----------
+#  It is assumed that perl is installed on the machine running this script.
+#     For RHEL / CentOS     yum install perl
+#     For Debian / Ubuntu   apt install perl
+#     For FreeBSD           pkg install perl5
+#
+#  It is assumed that a time sync *client* is installed and configured.
+#     AIX          xntpd should already be in the base install.  Uncomment from /etc/rc.tcpip
+#     CentOS 6     yum install ntpd    ; chkconfig on ntpd     ; service ntpd start
+#     CentOS 7+    systemd-timesyncd should already be in the base install.  systemctl enable systemd-timesyncd ; systemctl start systemd-timesync
+#     Ubuntu 16    apt install ntpd    ; service start ntpd
+#     Ubuntu 17+    systemd-timesyncd should already be in the base install.  systemctl enable systemd-timesyncd ; systemctl start systemd-timesync
+#     FreeBSD 11   pkg install ntpd    ; echo ntpd_enable=YES>>/etc/rc.conf ; echo 0.0>/var/db/ntpd.drift ; tzsetup ; /etc/rc.d/ntpd start
+#     MacOS        ntpd should already be in the base install
+#
+#  It is assumed that this script is being run as a low-privileged user (typically nagios), and that 
+#  typical user permissions are sufficient to run the time sync query commands in this script.
+#
+#
+
+# NOTES ON SYSTEMD
+# ----------------
+# The systemd-timesyncd daemon was not fully cooked in 2018, so different Linux vendors supported differing subsets of functionality.
+# The recommended time sync for Ubuntu 18.04+ and CentOS 7+ is:
+#   grep -i ubuntu /etc/os-release && (systemctl disable systemd-timesyncd ; apt install -y chrony ; systemctl enable chrony ; systemctl start chrony)
+#   grep -i centos /etc/os-release && (systemctl disable systemd-timesyncd ; yum install -y chrony ; systemctl enable chrony ; systemctl start chrony)
+
+
+
+
+# TROUBLESHOOTING
+# ---------------
+#   The first line of this script is #!/usr/bin/perl, which is fine for most UNIX-like operating systems.
+#   However, FreeBSD puts the perl binary at /usr/local/bin/perl, so please create a symlink on FreeBSD:
+#      ln -s /usr/local/bin/perl /usr/bin/perl
+#
+#   The "ntpq -p" and "chronyc sources" commands will truncate long hostnames and IP address to fit in the available space,
+#   so double-check any hostnames in the output if you are troubleshooting.
+#
+#   If you see the following entry in /var/log/messages :   Frequency format error in /var/lib/ntp/ntp.drift
+#   Try entering a floating point number in the file.  This gives ntpd a starting point.  
+#   For example:  echo 0.0>/var/lib/ntp/ntp.drift
+#
+#  If you see this message:  ERROR: /usr/sbin/ntpq is not executable by the current user 
+#  try making that file world-executable with:  chmod +x /usr/sbin/ntpq
+#
+#  If you see this message: 
+#     # ntpq -p
+#     ntpq: read: A remote host refused an attempted connect operation.
+#  it means ?????
+
+
+use strict;						#enforce good coding practices
+use Getopt::Long;                       		#allow --long-switches to be used as parameters
+
+#declare variables
+my ($verbose,$os,$cmd,$key);
+my ($time_daemon,$time_client,$time_configfile,%time_servers,$time_server_count,$time_server_names);
+my ($uname,$uptime,$ps,$ps_switches);
+my ($common_output_data,$perf_data);
+my ($OK,$WARN,$CRITICAL,$UNKNOWN,$CHECK_NAME);
+my ($offset,$last_update);
+my ($opt_h,$opt_v);
+$verbose            = "no";				#yes/no flag to increase verbosity during debugging
+$time_daemon        = "unknown";			#initialize with dummy value to avoid undef errors
+$time_client        = "unknown";			#initialize with dummy value to avoid undef errors
+$time_configfile    = "unknown";			#initialize with dummy value to avoid undef errors
+$common_output_data = "";                               #nagios output
+$perf_data          = "";                               #nagios performance data included in output
+$CHECK_NAME         = "time sync";
+
+#
+# Nagios return codes
+#
+$OK=		0;
+$WARN=		1;
+$CRITICAL=	2;
+$UNKNOWN=	3;
+
+
+
+
+sub get_options {
+   #
+   # this gets the command line parameters provided by the users
+   #
+   print "Running get_options subroutine \n" if ($verbose eq "yes");
+   Getopt::Long::Configure('bundling');
+   GetOptions(
+      "h"   => \$opt_h, "help"        => \$opt_h,
+      "v"   => \$opt_v, "verbose"      => \$opt_v,
+   );
+   #
+   # If the user supplied the -h or --help switch, give them some help.
+   #
+   if( defined( $opt_h ) ) {
+      print "Use this syntax \n";
+      print "   $0 \n";
+      print "   $0 --verbose     (increase output for debugging \n";
+      exit $CRITICAL;				#exit script
+   }
+   #
+   # If the user supplied the --verbose switch, increase output verbosity
+   #
+   if( defined( $opt_v ) ) {
+      $verbose = "yes";
+   } else {
+      $verbose = "no";
+   }
+}                       #end of subroutine
+
+
+
+
+
+sub sanity_checks {
+   #
+   print "Running sanity_checks subroutine \n" if ($verbose eq "yes");
+   #
+   # confirm ps binary exists and is executable
+   # figure out where the ps command is on this system (varies across UNIX flavors)
+   $ps = "/bin/ps"      if ( -e "/bin/ps");		
+   $ps = "/sbin/ps"     if ( -e "/sbin/ps");		
+   $ps = "/usr/bin/ps"  if ( -e "/usr/bin/ps");		
+   $ps = "/usr/sbin/ps" if ( -e "/usr/sbin/ps");		
+   if ( ! -e $ps ) {
+      print "ERROR: Cannot find $ps binary \n";
+      exit $CRITICAL;
+   }
+   if ( ! -x $ps ) {
+      print "ERROR: $ps is not executable by the current user \n";
+      exit $CRITICAL;
+   }
+   print "   found ps binary at $ps \n" if ($verbose eq "yes");
+   #
+   # confirm uname binary exists and is executable
+   # figure out where the uname command is on this system (varies across UNIX flavors)
+   $uname = "/bin/uname"      if ( -e "/bin/uname");	
+   $uname = "/sbin/uname"     if ( -e "/sbin/uname");	
+   $uname = "/usr/bin/uname"  if ( -e "/usr/bin/uname");	
+   $uname = "/usr/sbin/uname" if ( -e "/usr/sbin/uname");	
+   if ( ! -e $uname ) {
+      print "ERROR: Cannot find $uname binary \n";
+      exit $CRITICAL;
+   }
+   if ( ! -x $uname ) {
+      print "ERROR: $uname is not executable by the current user \n";
+      exit $CRITICAL;
+   }
+   print "   found uname binary at $uname \n" if ($verbose eq "yes");
+   #
+   # confirm uptime binary exists and is executable
+   # figure out where the uptime command is on this system (varies across UNIX flavors)
+   $uptime = "/bin/uptime"      if ( -e "/bin/uptime");	
+   $uptime = "/sbin/uptime"     if ( -e "/sbin/uptime");	
+   $uptime = "/usr/bin/uptime"  if ( -e "/usr/bin/uptime");	
+   $uptime = "/usr/sbin/uptime" if ( -e "/usr/sbin/uptime");	
+   if ( ! -e $uptime ) {
+      print "ERROR: Cannot find $uptime binary \n";
+      exit $CRITICAL;
+   }
+   if ( ! -x $uptime ) {
+      print "ERROR: $uptime is not executuable by the current user \n";
+      exit $CRITICAL;
+   }
+   print "   found uptime binary at $uptime \n" if ($verbose eq "yes");
+   #
+}						#end of subroutine
+
+
+
+
+sub determine_os {
+   #
+   print "Running determine_os subroutine \n" if ($verbose eq "yes");
+   #
+   $cmd = "$uname";
+   print "   running command: $cmd \n" if ($verbose eq "yes");
+   open(IN,"$cmd |");                                                   #open filehandle using command output
+   while (<IN>) {                                                       #read a line from the command output
+      if (/AIX/) {
+         $os          = "AIX";		#figure out OS-specific parameters for ps command
+         $ps_switches = "-ef";
+      } elsif (/HP-UX/) {
+         $os          = "HP-UX";
+         $ps_switches = "-ef";
+      } elsif (/Linux/) {
+         $os          = "Linux";
+         $ps_switches = "-ef";
+      } elsif (/SunOS/) {
+         $os          = "SunOS";
+         $ps_switches = "-ef";
+      } elsif (/FreeBSD/) {
+         $os          = "FreeBSD";
+         $ps_switches = "-aux";
+      } elsif (/NetBSD/) {
+         $os          = "NetBSD";
+         $ps_switches = "-aux";
+      } elsif (/OpenBSD/) {
+         $os          = "OpenBSD";
+         $ps_switches = "-aux";
+      } elsif (/Darwin/) {
+         $os          = "Darwin";
+         $ps_switches = "aux"; 		#MacOS / Darwin does not use - in the parameters
+      } else {
+         print "ERROR: Cannot determine operating system \n";
+         exit $CRITICAL;
+      } 								#end of if/elsif/else block
+   } 									#end of while loop
+   close IN;								#close filehandle
+   print "   operating system is $os \n" if ($verbose eq "yes");
+   $common_output_data = "$common_output_data OS=$os";			#add OS to the info that will be included in the script output
+}						#end of subroutine
+
+
+
+
+sub determine_time_daemon {
+   #
+   print "Running determine_time_daemon subroutine \n" if ($verbose eq "yes");
+   #
+   $cmd = "$ps $ps_switches";
+   print "   running command: $cmd \n" if ($verbose eq "yes");
+   open(IN,"$cmd |");                                                   #open filehandle from command output
+   while (<IN>) {                                                       #read a line from the command output
+      if ( /\/usr\/sbin\/xntpd/ ) {     				#AIX uses xntpd
+         $time_daemon     = "xntpd";
+         $time_client     = "/usr/bin/ntpq"                 if (-e "/usr/bin/ntpq");    
+         $time_client     = "/usr/sbin/ntpq"                if (-e "/usr/sbin/ntpq");  
+         $time_configfile = "/etc/ntp.conf"                 if (-e "/etc/ntp.conf");   
+         $time_configfile = "/home/padmin/config/ntp.conf"  if (-e "/home/padmin/config/ntp.conf");   #location on IBM VIOS
+      }									#end of if block
+      if ( /ntpd/ ) {		     					#CentOS 6 uses ntpd  (no fully qualified path)
+         $time_daemon     = "ntpd";
+         $time_client     = "/usr/bin/ntpq"  if (-e "/usr/bin/ntpq");    
+         $time_client     = "/usr/sbin/ntpq" if (-e "/usr/sbin/ntpq");  
+         $time_configfile = "/etc/ntp.conf";   
+      }									#end of if block
+      if ( /\/usr\/sbin\/ntpd/ ) {     					#CentOS 7 uses /usr/bin/ntpd
+         $time_daemon     = "ntpd";
+         $time_client     = "/usr/bin/ntpq"  if (-e "/usr/bin/ntpq");    
+         $time_client     = "/usr/sbin/ntpq" if (-e "/usr/sbin/ntpq");  
+         $time_configfile = "/etc/ntp.conf";   
+      }									#end of if block
+      if ( /\/usr\/sbin\/chronyd/ ) {     				#certain Linux flavours use chronyd
+         $time_daemon     = "chronyd";
+         $time_client     = "/usr/bin/chronyc" ;
+         $time_configfile = "/etc/chrony/chrony.conf" if (-e "/etc/chrony/chrony.conf");  #location on Debian/Ubuntu 
+         $time_configfile = "/etc/chrony.conf"        if (-e "/etc/chrony.conf");         #location on CentOS/RHEL 
+      }									#end of if block
+      if ( /\/lib\/systemd\/systemd-timesyncd/ ) { 			#certain Linux flavours use systemd-timesyncd
+         $time_daemon     = "systemd-timesyncd";
+         $time_client     = "/lib/systemd/systemd-timesyncd" ;
+         $time_configfile = "/etc/systemd/timesyncd.conf";
+      }									#end of if block
+   }									#end of while loop
+   close IN;								#close filehandle
+   #
+   # confirm a time daemon (xntpd, ntpd, chronyd,systemd-timesyncd) was found
+   if( $time_daemon eq "unknown" ) {                			#check for command line parameter
+      print "$CHECK_NAME UNKNOWN - could not determine time daemon. Please confirm ntpd or chronyd or systemd-timesyncd is installed. \n";
+      exit $UNKNOWN; 	                         			#exit script
+   }	
+   #  
+   # confirm time client binary and time config files exist
+   #  
+   if ( ! -e $time_client ) {
+      print "ERROR: Cannot find $time_client binary \n";
+      exit $CRITICAL;
+   }
+   if ( ! -x $time_client ) {
+      print "ERROR: $time_client is not executable by the current user \n";
+      exit $CRITICAL;
+   }
+   if ( ! -e $time_configfile ) {
+      print "ERROR: Cannot find $time_configfile config file \n";
+      exit $CRITICAL;
+   }
+   if ( ! -r $time_configfile ) {
+      print "ERROR: $time_configfile is not readable by the current user \n";
+      exit $CRITICAL;
+   }
+   #
+   print "   found time daemon $time_daemon, time client $time_client, config file $time_configfile \n" if ($verbose eq "yes");
+   $common_output_data = "$common_output_data daemon=$time_daemon";			#add name of time daemon to the info that will be included in the script output
+}						#end of subroutine
+
+
+
+
+
+
+sub check_uptime {
+   #
+   print "Running check_uptime subroutine \n" if ($verbose eq "yes");
+   #
+   # only check NTP synchronization if the machine has been up for at least one hour, just to give the clock time to settle.
+   # We figure this out by looking at the 4th field.  So long as it is not "mins," we should be ok.
+   # /usr/bin/uptime
+   #  04:32PM up 32  mins,  1 user,  load average: 1.21, 1.03, 0.74
+   #  04:37PM up 273 days, 6:07, 2 users, load average: 0.57, 0.93, 1.02
+   #  05:41PM up   1:37,  2 users,  load average: 0.95, 1.52, 1.26
+   #
+   $cmd = "$uptime";
+   print "   running command: $cmd \n" if ($verbose eq "yes");
+   open(IN,"$cmd |");                                                   #open filehandle from command output
+   while (<IN>) {                                                       #read a line from the command output
+      if ( /[a-zA-Z0-9:]+ +up +[0-9:,]+ +([0-9a-zA-Z,]+) / ) {     
+         if ($1 !~ /mins/) {
+	    print "   local machine has been up for more than 60 minutes - ok to proceed with checking time \n" if ($verbose eq "yes");
+         } else {
+	    print "   local machine has been up for less than 60 minutes - skipping time sync checks \n" if ($verbose eq "yes");
+	    print "$CHECK_NAME OK - machine has been up for less than 60 minutes - skipping time sync tests \n";
+	    exit $OK;
+         } 					#end of if/else block
+      } 					#end of if block
+   } 						#end of while loop
+   close IN;					#close filehandle
+}						#end of subroutine
+
+
+
+
+
+sub check_time_sync_systemd_timesyncd {
+   #
+   print "Running check_time_sync_systemd_timesyncd subroutine \n" if ($verbose eq "yes");
+   # 
+   if ( $time_daemon eq "systemd-timesyncd" ) {
+      #
+      ## if using systemd-timesyncd, 
+      #    the file modification time of /var/lib/systemd/timesync/clock is updated with the last successful synchronization.
+      #    Unfortunately, this file is only readable by root, so the nagios user will not be able to check the file modification time.
+
+      # if using systemd-timesyncd, figure out the time server with the command shown below.  
+      # Please note that systemd-timesyncd only synchronizes to a single upstream NTP server, even if multiple NTP servers are defined in timesyncd.conf
+      #
+      # $ systemctl status systemd-timesyncd
+      # systemd-timesyncd.service - Network Time Synchronization
+      # Loaded: loaded (/lib/systemd/system/systemd-timesyncd.service; enabled; vendor preset: enabled)
+      # Active: active (running) since Tue 2018-11-20 10:10:36 MST; 1h 16min ago
+      # Docs: man:systemd-timesyncd.service(8)
+      # Main PID: 11061 (systemd-timesyn)
+      # Status: "Synchronized to time server 91.189.89.199:123 (ntp.ubuntu.com)."     <------ this is the upstream time server
+      # Tasks: 2 (limit: 4542)
+      #  CGroup: /system.slice/systemd-timesyncd.service
+      #            11061 /lib/systemd/systemd-timesyncd
+      # Nov 20 10:10:36 root@myserver systemd[1]: Starting Network Time Synchronization...
+      # Nov 20 10:10:36 root@myserver systemd-timesyncd[11061]: The system is configured to read the RTC time in the local time zone. This mode can not be ful
+      # Nov 20 10:10:36 root@myserver systemd[1]: Started Network Time Synchronization.
+      # Nov 20 10:10:36 root@myserver  systemd-timesyncd[11061]: Synchronized to time server 91.189.89.199:123 (ntp.ubuntu.com).
+      #
+      #
+      #  $ timedatectl timesync-status
+      #  Server: 216.239.38.15 (time4.google.com)
+      #  Poll interval: 1min 4s (min: 32s; max 34min 8s)
+      #  Leap: normal
+      #  Version: 4
+      #  Stratum: 1          <---- get the stratum of the upstream time server
+      #  Reference: GPS
+      #  Precision: 1us (-20)
+      #  Root distance: 335us (max: 5s)
+      #  Offset: +316us      <---- get the offset of the local clock from the upstream time server
+      #  Delay: 349us
+      #  Jitter: 0
+      #  Packet count: 1
+      #  Frequency: -8.802ppm
+      #
+      #
+      print "   found time sync daemon $time_daemon \n" if ($verbose eq "yes");
+      $cmd = "systemctl status systemd-timesyncd";
+      print "   running command: $cmd \n" if ($verbose eq "yes");
+      open(IN,"$cmd |");                                                #open filehandle using command output
+      while (<IN>) {                                                    #read a line from the command output
+         if (/Status: \"Synchronized to time server ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):123/) {
+            $time_servers{$1}{name}        = $1; 
+            $time_servers{$1}{stratum}     = 0;      #get this value with timedatectl timesync-status
+            $time_servers{$1}{lastupdate}  = 0;      #get this value with timedatectl timesync-status
+            $time_servers{$1}{offset}      = 0;      #get this value with timedatectl timesync-status
+   	    #
+            # get the last update time
+            # BUG ALERT: this file is only readable by root, so the nagios user will not be able to read the file modification time.
+            if ( -f "/var/lib/systemd/timesync/clock" ) {
+               $time_servers{$1}{lastupdate} = 86400 * -M "/var/lib/systemd/timesync/clock";
+               $time_servers{$1}{lastupdate} = sprintf("%.0f", $time_servers{$1}{lastupdate});		#truncate to 0 decimal places (ie the nearest second)
+               print "   $time_servers{$1}{name} lastupdate=$time_servers{$1}{lastupdate}s \n" if ($verbose eq "yes");
+            }
+	    #
+	    # reformat the offset value (to be written...)
+	    #
+            print "   timeserver:$time_servers{$1}{name} stratum:$time_servers{$1}{stratum} lastupdate:$time_servers{$1}{lastupdate}s offset:$time_servers{$1}{offset}ms \n" if ($verbose eq "yes");
+            $common_output_data = "$common_output_data timeserver:$time_servers{$1}{name} stratum:$time_servers{$1}{stratum} lastupdate:$time_servers{$1}{lastupdate}s offset:$time_servers{$1}{offset}ms";			#add ndtails to the info that will be included in the script output
+         }								#end of if block
+      } 								#end of while loop
+   }    								#end of if block
+}									#end of subroutine
+
+
+
+
+
+
+sub check_time_sync_ntpd {
+   #
+   print "Running check_time_sync_ntpd subroutine \n" if ($verbose eq "yes");
+   # 
+   #
+   if ( ($time_daemon eq "ntpd") or ($time_daemon eq "xntpd") ) {
+      #
+      # The ntpq -p command will give us output similar to this:
+      #   # ntpq -p -n 127.0.0.1
+      #        remote           refid      st t when poll reach   delay   offset    disp
+      #   ==============================================================================
+      #   *ntp.example.com  time.nist.gov    2 u  262  512  377     0.70    0.115    0.15
+      #    0.ubuntu.pool.n .POOL.          16 p    -   64    0    0.000    0.000   0.000
+      #    1.ubuntu.pool.n .POOL.          16 p    -   64    0    0.000    0.000   0.000
+      #    2.ubuntu.pool.n .POOL.          16 p    -   64    0    0.000    0.000   0.000
+      #    3.ubuntu.pool.n .POOL.          16 p    -   64    0    0.000    0.000   0.000
+      #    ntp.ubuntu.com  .POOL.          16 p    -   64    0    0.000    0.000   0.000
+      #    10.10.20.7      .XFAC.          16 u    - 1024    0    0.000    0.000   0.000
+      #    10.10.20.8      .INIT.          16 u    - 1024    0    0.000    0.000   0.000
+      #  *zero.gotroot.ca 30.114.5.31      2 u  699 1024  377   22.881   -3.834   4.482
+      #  -209.115.181.108 209.115.181.108  4 u  381 1024  377   16.549  -15.415   4.197
+      #  +time.srv.ualber 129.128.153.62   2 u  666 1024  377   16.666   -3.939   3.631
+      #  +cloud1.pifts.ne 138.39.23.13     2 u 1620 1024  376   55.863   -1.864   4.184
+      #  +dns4.utoronto.c 206.108.0.132    2 u  174 1024  377   50.866   -4.130  22.700
+      #
+      # In this example, the "poll" column refers to how often (in seconds) the client will poll
+      #
+      # In this example, the "when" column refers to how many seconds ago the client contacted the server.
+      # If the "when" column goes for a long time with contacting the time server, the value can change from
+      # seconds to minutes/hours/days.  For example, if the client has not been able to contact the time server
+      # for 27 days, the when column would be: 27d
+      #
+      # The "st" column is for the stratum of the time server.  This value should be between 0 and 15.  Please
+      # note that if this value is 16, that represents an invalid value means the NTP client will not consider
+      # using that server for time synchronization.  The cause is usually one of the following:
+      #   - time provider not synchronized
+      #   - configured source does not exist
+      #   - ntp server not running
+      #
+      # Please note that the delay, offset, and disp columns are all in milliseconds.
+      #
+      print "   found time sync daemon $time_daemon \n" if ($verbose eq "yes");
+      $cmd = "$time_client -p -n 127.0.0.1";				# run ntpq -p to get NTP peers, and use -n to use IP address, because hostnames may be truncated
+      print "   running command: $cmd \n" if ($verbose eq "yes");
+      open(IN,"$cmd |");                                                #open filehandle using command output
+      while (<IN>) {                                                    #read a line from the command output
+         next if (/offset/);						#skip header line
+         next if (/=/);							#skip header line
+         next if (/\.POOL\./);						#skip lines containing .POOL. (because the stratum for .POOL. is not used)
+         next if (/\.XFAC\./);						#skip lines containing .XFAC. (because the stratum for .XFAC. is not used)
+         next if (/\.INIT\./);						#skip lines containing .XFAC. (because the time daemon is still INITializing)
+         next if (/ntpq: read: A remote host refused an attempted connect operation/);  #testing 2019/02/28 
+         s/^\*//;							#get rid of leading * character
+         s/^\+//;							#get rid of leading + character
+         s/^\-//;							#get rid of leading - character
+         s/^ +//;							#get rid of leading spaces
+         @_ = split /\s+/,$_; 						#split $_ on one or more whitespace
+         $time_servers{$_[0]}{name}        = $_[0]; 
+         $time_servers{$_[0]}{stratum}     = $_[2]; 
+         $time_servers{$_[0]}{lastupdate}  = $_[4]; 
+         $time_servers{$_[0]}{offset}      = $_[8]; 
+	 #
+	 # convert last update from minutes/hours/days to seconds
+	 $_ =  $time_servers{$_[0]}{lastupdate};
+	 if (/m/) {
+            s/m//;
+	    $_ = $_ * 60;						#convert from minutes to seconds
+	    $time_servers{$_[0]}{lastupdate} = $_;			#put converted value back into hash
+         }  								#end of if block
+         if (/h/) {
+            s/h//;
+            $_ = $_ * 60*60;						#convert from hours to seconds
+	    $time_servers{$_[0]}{lastupdate} = $_;			#put converted value back into hash
+         }  								#end of if block
+         if (/d/) {
+            s/d//;
+            $_ = $_ * 60*60*24;						#convert from days to seconds
+	    $time_servers{$_[0]}{lastupdate} = $_;			#put converted value back into hash
+         }  								#end of if block
+	 #
+	 # unlike chronyd, the ntpq always shows the offset in millseconds, so no unit conversions are required.  Just get rid of the +- signs.
+	 #
+	 $_ =  $time_servers{$_[0]}{offset};
+	 s/\+//;							#get rid of the + sign
+	 s/\-//;							#get rid of the - sign
+	 $time_servers{$_[0]}{offset} = $_;				#put converted value back into hash
+         #
+         print "   timeserver:$time_servers{$_[0]}{name} stratum:$time_servers{$_[0]}{stratum} lastupdate:$time_servers{$_[0]}{lastupdate}s offset:$time_servers{$_[0]}{offset}ms \n" if ($verbose eq "yes");
+            $common_output_data = "$common_output_data  timeserver:$time_servers{$_[0]}{name} stratum:$time_servers{$_[0]}{stratum} lastupdate:$time_servers{$_[0]}{lastupdate}s offset:$time_servers{$_[0]}{offset}ms";  #add details to the info that will be included in the script output
+      } 								#end of while loop
+   } 			#end of if block
+}						#end of subroutine
+
+
+
+sub check_time_sync_chronyd {
+   #
+   print "Running check_time_sync_chronyd subroutine \n" if ($verbose eq "yes");
+   # 
+   if ( $time_daemon eq "chronyd" ) {
+      #
+      ## if using chronyd, figure out the time servers with the command shown below
+      #   Note the LastRX field is the number of seconds since the last communication
+      #   The stratum should be less than 15 (preferably less than 3)
+      # $ chronyc sources
+      # 210 Number of sources = 4
+      # MS Name/IP address         Stratum Poll Reach LastRx Last sample
+      # ===============================================================================
+      # ^* time.srv.ualberta.ca          2  10   377  1030  +2264us[+2549us] +/-   26ms
+      # ^+ k8s-w01.tblflp.zone           2  10   377   907  -3824us[-3824us] +/-   79ms
+      # ^- 206.108.0.134                 1  10   377   201  +2623us[+2623us] +/-  526ms
+      # ^+ reverb.baxterit.net           2   9   377   451   -465us[ -465us] +/-   81ms
+      # ^? k8s-w04.tblflp.zone           2  10     3   599  -4318us[-4318us] +/-   70ms
+      # 
+      # 
+      #
+      print "   found time sync daemon $time_daemon \n" if ($verbose eq "yes");
+      $cmd = "$time_client sources";
+      print "   running command: $cmd \n" if ($verbose eq "yes");
+      open(IN,"$cmd |");                                                #open filehandle using command output
+      while (<IN>) {                                                    #read a line from the command output
+         next if (/Number of sources/);					#skip header line
+         next if (/Name/);						#skip header line
+         next if (/=/);							#skip header line
+         s/^\^\*//; 							#get rid of leading ^* characters
+         s/^\^\+//; 							#get rid of leading ^+ characters
+         s/^\^\-//; 							#get rid of leading ^- characters
+         s/^\^\?//; 							#get rid of leading ^? characters
+         s/^ +//;							#get rid of leading spaces
+         @_ = split /\s+/,$_; 						#split $_ on one or more whitespace
+         $time_servers{$_[0]}{name}        = $_[0]; 
+         $time_servers{$_[0]}{stratum}     = $_[1]; 
+         $time_servers{$_[0]}{lastupdate}  = $_[4]; 
+         $time_servers{$_[0]}{offset}      = $_[5]; 
+	 #
+	 # convert last update from minutes/hours/days to seconds
+	 $_ =  $time_servers{$_[0]}{lastupdate};
+	 if (/m/) {
+            s/m//;
+	    $_ = $_ * 60;						#convert from minutes to seconds
+	    $time_servers{$_[0]}{lastupdate} = $_;			#put converted value back into hash
+         }  								#end of if block
+         if (/h/) {
+            s/h//;
+            $_ = $_ * 60*60;						#convert from hours to seconds
+	    $time_servers{$_[0]}{lastupdate} = $_;			#put converted value back into hash
+         }  								#end of if block
+         if (/d/) {
+            s/d//;
+            $_ = $_ * 60*60*24;						#convert from days to seconds
+	    $time_servers{$_[0]}{lastupdate} = $_;			#put converted value back into hash
+         }  								#end of if block
+	 #
+	 # reformat the offset value
+	 #
+	 $_ =  $time_servers{$_[0]}{offset};
+	 s/\+//;							#get rid of the + sign
+	 s/\-//;							#get rid of the - sign
+         s/\[.*//;							#get rid of everything after the [
+	 #
+	 if (/ns/) {
+            s/ns//;
+	    $_ = $_ / 1000 / 1000;					#convert from nanoseconds to milliseconds
+	    $_ = sprintf("%.0f", $_);					#truncate to 0 decimal places (ie the nearest millisecond)
+	    $time_servers{$_[0]}{offset} = $_;				#put converted value back into hash
+         }  								#end of if block
+	 if (/us/) {
+            s/us//;
+	    $_ = $_ / 1000;						#convert from microseconds to milliseconds
+	    $_ = sprintf("%.0f", $_);					#truncate to 0 decimal places (ie the nearest millisecond)
+	    $time_servers{$_[0]}{offset} = $_;				#put converted value back into hash
+         }  								#end of if block
+	 if (/ms/) {
+            s/ms//;
+	    $_ = $_ * 1;						#convert from milliseconds to milliseconds
+	    $_ = sprintf("%.0f", $_);					#truncate to 0 decimal places (ie the nearest millisecond)
+	    $time_servers{$_[0]}{offset} = $_;				#put converted value back into hash
+         }  								#end of if block
+	 if (/s/) {
+            s/s//;
+	    $_ = $_ * 1000;						#convert from seconds to milliseconds
+	    $_ = sprintf("%.0f", $_);					#truncate to 0 decimal places (ie the nearest millisecond)
+	    $time_servers{$_[0]}{offset} = $_;				#put converted value back into hash
+         }  								#end of if block
+         print "   timeserver:$time_servers{$_[0]}{name} stratum:$time_servers{$_[0]}{stratum} lastupdate:$time_servers{$_[0]}{lastupdate}s offset:$time_servers{$_[0]}{offset}ms \n" if ($verbose eq "yes");
+            $common_output_data = "$common_output_data  timeserver:$time_servers{$_[0]}{name} stratum:$time_servers{$_[0]}{stratum} lastupdate:$time_servers{$_[0]}{lastupdate}s offset:$time_servers{$_[0]}{offset}ms";  #add details to the info that will be included in the script output
+      } 								#end of while loop
+   }    								#end of if block
+}						#end of subroutine
+
+
+
+
+
+
+
+
+
+sub get_time_server_count {
+   #
+   # This subroutine exists to confirm there is at least one time server 
+   #
+   print "Running get_time_server_count subroutine \n" if ($verbose eq "yes");
+   #
+   $time_server_count = 0;						#initialize counter
+   foreach $key (sort keys %time_servers) {
+      $time_server_count++;						#increment counter
+   }                                                                    #end of foreach loop
+   #
+   print "   found $time_server_count time servers \n" if ($verbose eq "yes");
+   if ( $time_server_count == 0 ) {
+      $cmd = "$time_client sources"          if ($time_daemon eq "chronyd");		#figure out troubleshooting command
+      $cmd = "$time_client -p"               if ($time_daemon eq "ntpd");		#figure out troubleshooting command
+      $cmd = "$time_client -p"               if ($time_daemon eq "xntpd");		#figure out troubleshooting command
+      $cmd = "unknown command to figure out" if ($time_daemon eq "systemd-timesyncd");	#figure out troubleshooting command
+      print "$CHECK_NAME CRITICAL - could not find any time servers.  Please check the output of: $cmd \n";
+      exit $CRITICAL;
+   }	 								#end of if block
+}									#end of subroutine
+
+
+
+
+
+
+sub print_output {
+   #
+   print "Running print_output subroutine \n" if ($verbose eq "yes");
+   #
+   # figure out the names of the time servers to put in the output message
+   $time_server_names = "";						#initialize variable
+   foreach $key (sort keys %time_servers) {
+      $time_server_names = "$time_server_names,$time_servers{$key}{name}";						#increment counter
+   }                                                                    #end of foreach loop
+   $time_server_names =~ s/^,//;					#get rid of leading comma
+   #
+   #
+   #
+   # Send alert if time is off by more than 1000 milliseconds with any time server
+   $offset = 0;								#initialize variable
+   foreach $key (sort keys %time_servers) {
+      if ( $time_servers{$key}{offset} > 1000 ) { 
+         print "$CHECK_NAME WARN - time on this machine off by $time_servers{$key}{offset} milliseconds from time server $time_servers{$key}{name} .  $common_output_data | $perf_data \n";
+         exit $WARN;
+      } 								#end of if block
+      # calculate the average offset across all the time servers
+      $offset = $offset + $time_servers{$key}{offset};			#add up all the offset values
+   } 									#end of foreach loop
+   $offset = $offset / $time_server_count;				#divide running total by number of time servers to get average
+   $offset = sprintf("%.0f", $offset);					#truncate to 0 decimal places (ie the nearest millisecond)
+   print "   average offset across $time_server_count time servers is $offset milliseconds \n" if ($verbose eq "yes");
+   $perf_data = "$perf_data offset:${offset}ms;;;;";
+   #
+   #
+   # Send alert if time server stratum is too high
+   # Valid stratum values are 1-15, so a value higher than 15 is considered invalid and will be ignored
+   foreach $key (sort keys %time_servers) {
+      if ( $time_servers{$key}{stratum} > 15 ) { 
+         print "$CHECK_NAME CRITICAL - time server $time_servers{$key}{name} has a stratum of $time_servers{$key}{stratum}.  Valid values are 1 through 15. $common_output_data | $perf_data \n";
+         exit $CRITICAL;
+      } 								#end of if block
+      if ( $time_servers{$key}{stratum} > 5 ) { 
+         print "$CHECK_NAME WARN - the stratum of time server $time_servers{$key}{name} is $time_servers{$key}{stratum}.  This is still a valid stratum, but we prefer to sync against time servers with a stratum between 1 and 5.  Please review output of ntptrace, ntpq -p, or chronyc sources commands.  It may be that a time server we sync against has lowered its stratum because it is becoming less reliable, or it has been unable to sync with an upstream provider for some time.  See if you can get the stratum back down to a lower value.  $common_output_data | $perf_data \n";
+         exit $WARN;
+      } 								#end of if block
+   } 									#end of foreach loop
+   #
+   #
+   # Send alert if last sync with time server was more than 24 hours ago (24 hours * 60 minutes * 60 seconds = 86400 seconds)
+   $last_update = 0;								#initialize variable
+   foreach $key (sort keys %time_servers) {
+      if ( $time_servers{$key}{lastupdate} > 86400 ) { 
+         print "$CHECK_NAME WARN - no sync with time server $time_servers{$key}{name} for more than 24 hours \n";
+         exit $WARN;
+      } 								#end of if block
+      $last_update = $last_update + $time_servers{$key}{lastupdate};	#add up all the values for last update 
+   } 									#end of foreach loop
+   $last_update = $last_update / $time_server_count;			#divide running total by number of time servers to get average
+   $last_update = sprintf("%.0f", $last_update);			#truncate to 0 decimal places (ie the nearest second)
+   print "   average time since last sync across $time_server_count time servers is $last_update seconds \n" if ($verbose eq "yes");
+   #
+   #
+   # we should only get this far if everything is good
+   print "$CHECK_NAME OK $common_output_data | $perf_data \n";
+   exit $OK;
+}			#end of subroutine
+
+
+
+
+# ---------------- main body of script -------------------------
+get_options;
+sanity_checks;
+determine_os;
+determine_time_daemon;
+check_uptime;
+check_time_sync_systemd_timesyncd;
+check_time_sync_ntpd;
+check_time_sync_chronyd;
+get_time_server_count;
+print_output;
+
