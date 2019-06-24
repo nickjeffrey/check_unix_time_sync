@@ -17,6 +17,7 @@
 #  2019/02/28	njeffrey	"ntpq -p -n" failing on AIX.  Change to "ntpq -p -n 127.0.0.1"
 #  2019/03/04	njeffrey	Add $common_output_data and $perf_data variables
 #  2019/03/04	njeffrey	Add nagios performance data to output
+#  2019/06/24	njeffrey	Update chrony section to catch errors if perimeter firewall blocking upstream NTP
 
 
 
@@ -582,6 +583,17 @@ sub check_time_sync_chronyd {
       # ^? k8s-w04.tblflp.zone           2  10     3   599  -4318us[-4318us] +/-   70ms
       # 
       # 
+      # If the output shows that the Stratum is all zeros, and the values in the last column are all zeros, 
+      # it probably means the perimeter firewall is blocking outgoing NTP traffic, and you should adjust /etc/chrony/chrony.conf 
+      # to point at internal NTP servers.
+      #
+      # MS Name/IP address         Stratum Poll Reach LastRx Last sample
+      # ===============================================================================
+      # ^? pugot.canonical.com           0   9     0     -     +0ns[   +0ns] +/-    0ns
+      # ^? chilipepper.canonical.com     0   9     0     -     +0ns[   +0ns] +/-    0ns
+      # ^? alphyn.canonical.com          0   9     0     -     +0ns[   +0ns] +/-    0ns
+      # ^? golem.canonical.com           0   9     0     -     +0ns[   +0ns] +/-    0ns
+      #
       #
       print "   found time sync daemon $time_daemon \n" if ($verbose eq "yes");
       $cmd = "$time_client sources";
@@ -617,6 +629,10 @@ sub check_time_sync_chronyd {
          if (/d/) {
             s/d//;
             $_ = $_ * 60*60*24;						#convert from days to seconds
+	    $time_servers{$_[0]}{lastupdate} = $_;			#put converted value back into hash
+         }  								#end of if block
+         if (/\-/) {							#if the LastUpdate field is "-", change to zero (indicates no connection)
+            s/\-/0/;
 	    $time_servers{$_[0]}{lastupdate} = $_;			#put converted value back into hash
          }  								#end of if block
 	 #
@@ -724,6 +740,10 @@ sub print_output {
    # Send alert if time server stratum is too high
    # Valid stratum values are 1-15, so a value higher than 15 is considered invalid and will be ignored
    foreach $key (sort keys %time_servers) {
+      if ( $time_servers{$key}{stratum} < 1 ) { 
+         print "$CHECK_NAME CRITICAL - time server $time_servers{$key}{name} has a stratum of $time_servers{$key}{stratum}.  Valid values are 1 through 15. This can happen if the perimeter firewall is blocking NTP to the Internet.  Check your upstream NTP sources, and use an NTP server inside the firewall if necessary.  $common_output_data | $perf_data \n";
+         exit $CRITICAL;
+      } 								#end of if block
       if ( $time_servers{$key}{stratum} > 15 ) { 
          print "$CHECK_NAME CRITICAL - time server $time_servers{$key}{name} has a stratum of $time_servers{$key}{stratum}.  Valid values are 1 through 15. $common_output_data | $perf_data \n";
          exit $CRITICAL;
