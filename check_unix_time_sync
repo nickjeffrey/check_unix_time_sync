@@ -18,6 +18,7 @@
 #  2019/03/04	njeffrey	Add $common_output_data and $perf_data variables
 #  2019/03/04	njeffrey	Add nagios performance data to output
 #  2019/06/24	njeffrey	Update chrony section to catch errors if perimeter firewall blocking upstream NTP
+#  2020/08/15	njeffrey	Regex fix detecting 60 minutes of uptime
 
 
 
@@ -363,9 +364,12 @@ sub check_uptime {
    print "Running check_uptime subroutine \n" if ($verbose eq "yes");
    #
    # only check NTP synchronization if the machine has been up for at least one hour, just to give the clock time to settle.
-   # We figure this out by looking at the 4th field.  So long as it is not "mins," we should be ok.
+   # We figure this out by looking at the 4th field.  So long as it is not "min" or "mins," we should be ok.
    # /usr/bin/uptime
-   #  04:32PM up 32  mins,  1 user,  load average: 1.21, 1.03, 0.74
+   #  04:32PM up 32  mins,  1 user,  load average: 1.21, 1.03, 0.74         <----- some Linux flavours report "mins"
+   #  17:11:49 up 48 min,  2 users,  load average: 0.00, 0.02, 0.05         <----- but other  flavours report "min"
+   #  17:23:19 up  1:00,  4 users,  load average: 0.19, 0.08, 0.06          <----- uptime one hour and 00 minutes
+   #  17:25:19 up  1:02,  4 users,  load average: 0.19, 0.08, 0.06          <----- uptime one hour and 02 minutes
    #  04:37PM up 273 days, 6:07, 2 users, load average: 0.57, 0.93, 1.02
    #  05:41PM up   1:37,  2 users,  load average: 0.95, 1.52, 1.26
    #
@@ -374,7 +378,7 @@ sub check_uptime {
    open(IN,"$cmd |");                                                   #open filehandle from command output
    while (<IN>) {                                                       #read a line from the command output
       if ( /[a-zA-Z0-9:]+ +up +[0-9:,]+ +([0-9a-zA-Z,]+) / ) {     
-         if ($1 !~ /mins/) {
+         if ( ($1 !~ /min/) && ($1 !~ /mins/) ) {			#check for both "min" and "mins"
 	    print "   local machine has been up for more than 60 minutes - ok to proceed with checking time \n" if ($verbose eq "yes");
          } else {
 	    print "   local machine has been up for less than 60 minutes - skipping time sync checks \n" if ($verbose eq "yes");
