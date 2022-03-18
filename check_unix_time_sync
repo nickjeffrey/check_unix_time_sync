@@ -19,6 +19,7 @@
 #  2019/03/04	njeffrey	Add nagios performance data to output
 #  2019/06/24	njeffrey	Update chrony section to catch errors if perimeter firewall blocking upstream NTP
 #  2020/08/15	njeffrey	Regex fix detecting 60 minutes of uptime
+#  2022/03/17	njeffrey	Add error check for ntpq -p -n 127.0.0.1 reporting back with: No association ID's returned
 
 
 
@@ -117,7 +118,11 @@
 #     # ntpq -p
 #     ntpq: read: A remote host refused an attempted connect operation.
 #  it means ?????
-
+#
+#  If you see this message: 
+#     # ntpq -p
+#     No association ID's returned 
+#  it means that the xntpd daemon on AIX does not recognize its NTP servers.  Restart the daemon with: stopsrc -s xntpd ; startsrc -s xntpd
 
 use strict;						#enforce good coding practices
 use Getopt::Long;                       		#allow --long-switches to be used as parameters
@@ -524,6 +529,7 @@ sub check_time_sync_ntpd {
          next if (/\.XFAC\./);						#skip lines containing .XFAC. (because the stratum for .XFAC. is not used)
          next if (/\.INIT\./);						#skip lines containing .XFAC. (because the time daemon is still INITializing)
          next if (/ntpq: read: A remote host refused an attempted connect operation/);  #testing 2019/02/28 
+         next if (/No association ID/);  				#no time servers found
          s/^\*//;							#get rid of leading * character
          s/^\+//;							#get rid of leading + character
          s/^\-//;							#get rid of leading - character
