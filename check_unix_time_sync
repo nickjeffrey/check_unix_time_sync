@@ -20,7 +20,7 @@
 #  2019/06/24	njeffrey	Update chrony section to catch errors if perimeter firewall blocking upstream NTP
 #  2020/08/15	njeffrey	Regex fix detecting 60 minutes of uptime
 #  2022/03/17	njeffrey	Add error check for ntpq -p -n 127.0.0.1 reporting back with: No association ID's returned
-
+#  2022/08/23	njeffrey	Bug fix in performance data output
 
 
 # NOTES
@@ -744,7 +744,7 @@ sub print_output {
    $offset = $offset / $time_server_count;				#divide running total by number of time servers to get average
    $offset = sprintf("%.0f", $offset);					#truncate to 0 decimal places (ie the nearest millisecond)
    print "   average offset across $time_server_count time servers is $offset milliseconds \n" if ($verbose eq "yes");
-   $perf_data = "$perf_data offset:${offset}ms;;;;";
+   $perf_data = "$perf_data offset=${offset}ms;;;;";
    #
    #
    # Send alert if time server stratum is too high
