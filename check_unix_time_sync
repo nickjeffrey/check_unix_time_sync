@@ -21,6 +21,7 @@
 #  2020/08/15	njeffrey	Regex fix detecting 60 minutes of uptime
 #  2022/03/17	njeffrey	Add error check for ntpq -p -n 127.0.0.1 reporting back with: No association ID's returned
 #  2022/08/23	njeffrey	Bug fix in performance data output
+#  2022/09/26	njeffrey	Tweak regex for systemd-timesyncd on Ubuntu 22.04
 
 
 # NOTES
@@ -419,6 +420,7 @@ sub check_time_sync_systemd_timesyncd {
       # Docs: man:systemd-timesyncd.service(8)
       # Main PID: 11061 (systemd-timesyn)
       # Status: "Synchronized to time server 91.189.89.199:123 (ntp.ubuntu.com)."     <------ this is the upstream time server
+      # Status: "Initial synchronization to time server 65.100.46.166:123 (0.ubuntu.pool.ntp.org)."
       # Tasks: 2 (limit: 4542)
       #  CGroup: /system.slice/systemd-timesyncd.service
       #            11061 /lib/systemd/systemd-timesyncd
@@ -450,6 +452,27 @@ sub check_time_sync_systemd_timesyncd {
       open(IN,"$cmd |");                                                #open filehandle using command output
       while (<IN>) {                                                    #read a line from the command output
          if (/Status: \"Synchronized to time server ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):123/) {
+            $time_servers{$1}{name}        = $1; 
+            $time_servers{$1}{stratum}     = 0;      #get this value with timedatectl timesync-status
+            $time_servers{$1}{lastupdate}  = 0;      #get this value with timedatectl timesync-status
+            $time_servers{$1}{offset}      = 0;      #get this value with timedatectl timesync-status
+   	    #
+            # get the last update time
+            # BUG ALERT: this file is only readable by root, so the nagios user will not be able to read the file modification time.
+            if ( -f "/var/lib/systemd/timesync/clock" ) {
+               $time_servers{$1}{lastupdate} = 86400 * -M "/var/lib/systemd/timesync/clock";
+               $time_servers{$1}{lastupdate} = sprintf("%.0f", $time_servers{$1}{lastupdate});		#truncate to 0 decimal places (ie the nearest second)
+               print "   $time_servers{$1}{name} lastupdate=$time_servers{$1}{lastupdate}s \n" if ($verbose eq "yes");
+            }
+	    #
+	    # reformat the offset value (to be written...)
+	    #
+            print "   timeserver:$time_servers{$1}{name} stratum:$time_servers{$1}{stratum} lastupdate:$time_servers{$1}{lastupdate}s offset:$time_servers{$1}{offset}ms \n" if ($verbose eq "yes");
+            $common_output_data = "$common_output_data timeserver:$time_servers{$1}{name} stratum:$time_servers{$1}{stratum} lastupdate:$time_servers{$1}{lastupdate}s offset:$time_servers{$1}{offset}ms";			#add ndtails to the info that will be included in the script output
+         }								#end of if block
+      } 								#end of while loop
+   }    								#end of if block
+   if (/Status: \"Initial synchronization to time server ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):123/) {
             $time_servers{$1}{name}        = $1; 
             $time_servers{$1}{stratum}     = 0;      #get this value with timedatectl timesync-status
             $time_servers{$1}{lastupdate}  = 0;      #get this value with timedatectl timesync-status
