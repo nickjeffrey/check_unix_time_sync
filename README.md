@@ -11,7 +11,7 @@ This assumes that you already have ssh key pairs configured.
 ```
    # Define service for checking time synchronization 
    define service{
-           use                             generic-24x7-service
+           use                             generic-service
            host_name                       unix11
            service_description             time sync
            check_command                   check_by_ssh!"/usr/local/nagios/libexec/check_unix_time_sync"
@@ -24,7 +24,7 @@ This assumes that you already have ssh key pairs configured.
 ```
    # Define service for checking time synchronization 
    define service{
-           use                             generic-24x7-service
+           use                             generic-service
            host_name                       unix11
            service_description             time sync
            check_command                   check_nrpe!check_unix_time_sync -t 30
@@ -43,6 +43,8 @@ time sync OK  OS=Linux daemon=ntpd  timeserver:10.10.20.7 stratum:3 lastupdate:3
 time sync OK  OS=Linux daemon=chronyd  timeserver:0.pool.ntp.org stratum:2 lastupdate:523s offset:4ms  timeserver:1.pool.ntp.org stratum:2 lastupdate:337s offset:1ms  timeserver:time.nist.gov stratum:1 lastupdate:51s offset:3ms  |  offset:2ms;;;;
 
 time sync OK  OS=AIX daemon=ntpd  timeserver:ntp1.example.com stratum:3 lastupdate:562s offset:10.421ms  timeserver:ntp2.example.com stratum:2 lastupdate:386s offset:10.327ms |  offset:10ms;;;;
+
+time sync OK  OS=Linux daemon=systemd-timesyncd timeserver:ntp1.example.com stratum:1 lastupdate:1648s offset:20ms |  offset=20ms;;;;
 
 time sync WARN - time on this machine off by 101 milliseconds from time server ntp1.example.com.  OS=Linux daemon=ntpd  timeserver:ntp1.example.com stratum:3 lastupdate:812s offset:101.260ms |  offset:101ms;;;;
 
