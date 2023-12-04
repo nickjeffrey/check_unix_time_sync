@@ -23,6 +23,8 @@
 #  2022/08/23	njeffrey	Bug fix in performance data output
 #  2022/09/26	njeffrey	Tweak regex for systemd-timesyncd on Ubuntu 22.04
 #  2023/02/14	njeffrey	Allow stratum 0-15 instead of 1-15 because some onsite NTP servers are advertising themselves as stratum 0
+#  2023/12/04	njeffrey	Add variables $stratum_warn $stratum_crit
+#  2023/12/04	njeffrey	Adjust $stratum_warn from 5 to 6
 
 
 # NOTES
@@ -134,6 +136,7 @@ my ($verbose,$os,$cmd,$key);
 my ($time_daemon,$time_client,$time_configfile,%time_servers,$time_server_count,$time_server_names);
 my ($uname,$uptime,$ps,$ps_switches);
 my ($common_output_data,$perf_data);
+my ($stratum_warn,$stratum_crit);
 my ($OK,$WARN,$CRITICAL,$UNKNOWN,$CHECK_NAME);
 my ($offset,$last_update);
 my ($opt_h,$opt_v);
@@ -144,7 +147,8 @@ $time_configfile    = "unknown";			#initialize with dummy value to avoid undef e
 $common_output_data = "";                               #nagios output
 $perf_data          = "";                               #nagios performance data included in output
 $CHECK_NAME         = "time sync";
-
+$stratum_warn       = 6;				#warn if NTP stratum is above this value
+$stratum_crit       = 15;				#warn if NTP stratum is above or equal to this value
 #
 # Nagios return codes
 #
@@ -775,12 +779,12 @@ sub print_output {
          print "$CHECK_NAME CRITICAL - time server $time_servers{$key}{name} has a stratum of $time_servers{$key}{stratum}.  Valid values are 0 through 15. This can happen if the perimeter firewall is blocking NTP to the Internet.  Check your upstream NTP sources, and use an NTP server inside the firewall if necessary.  $common_output_data | $perf_data \n";
          exit $CRITICAL;
       } 														#end of if block
-      if ( $time_servers{$key}{stratum} > 15 ) { 
-         print "$CHECK_NAME CRITICAL - time server $time_servers{$key}{name} has a stratum of $time_servers{$key}{stratum}.  Valid values are 0 through 15. $common_output_data | $perf_data \n";
+      if ( $time_servers{$key}{stratum} > $stratum_crit ) { 
+         print "$CHECK_NAME CRITICAL - time server $time_servers{$key}{name} has a stratum of $time_servers{$key}{stratum}.  Valid values are 0 through $stratum_crit .  $common_output_data | $perf_data \n";
          exit $CRITICAL;
       } 														#end of if block
-      if ( $time_servers{$key}{stratum} > 5 ) { 
-         print "$CHECK_NAME WARN - the stratum of time server $time_servers{$key}{name} is $time_servers{$key}{stratum}.  This is still a valid stratum, but we prefer to sync against time servers with a stratum between 0 and 5.  Please review output of ntptrace, ntpq -p, or chronyc sources commands.  It may be that a time server we sync against has lowered its stratum because it is becoming less reliable, or it has been unable to sync with an upstream provider for some time.  See if you can get the stratum back down to a lower value.  $common_output_data | $perf_data \n";
+      if ( $time_servers{$key}{stratum} > $stratum_warn ) { 
+         print "$CHECK_NAME WARN - the stratum of time server $time_servers{$key}{name} is $time_servers{$key}{stratum}.  This is still a valid stratum, but we prefer to sync against time servers with a stratum between 0 and $stratum_warn .  Please review output of ntptrace, ntpq -p, or chronyc sources commands.  It may be that a time server we sync against has lowered its stratum because it is becoming less reliable, or it has been unable to sync with an upstream provider for some time.  See if you can get the stratum back down to a lower value.  $common_output_data | $perf_data \n";
          exit $WARN;
       } 														#end of if block
    } 															#end of foreach loop
