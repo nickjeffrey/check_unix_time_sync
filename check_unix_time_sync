@@ -1,9 +1,5 @@
 #!/usr/bin/perl -w
 
-# FUTURE ENHANCEMENTS
-# -------------------
-#  systemd-timesyncd is not well supported by this script, because "timedatectl timesync-status" 
-#  is not yet supported by Ubuntu 18 / CentOS 7, so we cannot easily capture the stratum and offset.
  
 # CHANGE LOG
 # ----------
@@ -25,6 +21,7 @@
 #  2023/02/14	njeffrey	Allow stratum 0-15 instead of 1-15 because some onsite NTP servers are advertising themselves as stratum 0
 #  2023/12/04	njeffrey	Add variables $stratum_warn $stratum_crit
 #  2023/12/04	njeffrey	Adjust $stratum_warn from 5 to 6
+#  2024/03/13   njeffrey        Enhance error checks for systemd-timesyncd
 
 
 # NOTES
@@ -95,9 +92,10 @@
 # NOTES ON SYSTEMD
 # ----------------
 # The systemd-timesyncd daemon was not fully cooked in 2018, so different Linux vendors supported differing subsets of functionality.
-# The recommended time sync for Ubuntu 18.04+ and CentOS 7+ is:
+# The recommended time sync for Ubuntu 18.04 and CentOS 7 is:
 #   grep -i ubuntu /etc/os-release && (systemctl disable systemd-timesyncd ; apt install -y chrony ; systemctl enable chrony ; systemctl start chrony)
 #   grep -i centos /etc/os-release && (systemctl disable systemd-timesyncd ; yum install -y chrony ; systemctl enable chrony ; systemctl start chrony)
+# systemd-timesyncd on Ubuntu 22.04+ and RHEL8+ seem fine.
 
 
 
@@ -127,6 +125,13 @@
 #     # ntpq -p
 #     No association ID's returned 
 #  it means that the xntpd daemon on AIX does not recognize its NTP servers.  Restart the daemon with: stopsrc -s xntpd ; startsrc -s xntpd
+#
+# If you see this message:
+#    Warning: The unit file, source configuration file or drop-ins of systemd-timesyncd.service changed on disk. Run 'systemctl daemon-reload' to reload units.
+# it means that you do not have an NTP server defined.  Add a line similar to the following to the /etc/systemd/timesyncd.conf file:
+# NTP=0.ca.pool.ntp.org time.nist.gov 192.168.99.99
+#
+
 
 use strict;						#enforce good coding practices
 use Getopt::Long;                       		#allow --long-switches to be used as parameters
@@ -477,6 +482,10 @@ sub check_time_sync_systemd_timesyncd {
    print "   running command: $cmd \n" if ($verbose eq "yes");
    open(IN,"$cmd |");                                                		#open filehandle using command output
    while (<IN>) {                                                    		#read a line from the command output
+      if ( /Server: ([0-9a-zA-Z_\-\.]+)/ ) { 
+         $time_servers{timeserver1}{name} = $1; 
+         print "   server:$time_servers{timeserver1}{name} \n" if ($verbose eq "yes");
+      }
       if ( /Stratum: ([0-9]+)/ ) { 
          $time_servers{timeserver1}{stratum} = $1; 
          print "   stratum:$time_servers{timeserver1}{stratum} \n" if ($verbose eq "yes");
