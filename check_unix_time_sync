@@ -22,6 +22,7 @@
 #  2023/12/04	njeffrey	Add variables $stratum_warn $stratum_crit
 #  2023/12/04	njeffrey	Adjust $stratum_warn from 5 to 6
 #  2024/03/13   njeffrey        Enhance error checks for systemd-timesyncd
+#  2025/07/13   njeffrey        Update check_time_sync_chronyd to use "chronyc -c sources" -c parameter for CSV output for easier regex parsing
 
 
 # NOTES
@@ -617,6 +618,24 @@ sub check_time_sync_chronyd {
    ## if using chronyd, figure out the time servers with the command shown below
    #   Note the LastRX field is the number of seconds since the last communication
    #   The stratum should be less than 15 (preferably less than 3)
+   #
+   # The MS column contains two characters, first character is Mode, second character is State
+   # First character options:
+   #   ^   Server (NTP server configured in chrony)
+   #   =   Peer (symmetric NTP peer)
+   #   #   Local reference clock
+   #   ~   Source discovered via multicast/broadcast
+   #   ?   Unreachable or unknown source
+   #
+   # Second character (State) options:
+   #   *   Selected – source currently used for sync
+   #   +   Candidate – good source, not selected
+   #   -   Outlier – discarded due to timing error
+   #   ?   Unreachable – no recent valid response
+   #   x   Falseticker – rejected as false time source
+   #   #   Previously selected but not currently used
+   #
+   #
    # $ chronyc sources
    # 210 Number of sources = 4
    # MS Name/IP address         Stratum Poll Reach LastRx Last sample
@@ -640,78 +659,52 @@ sub check_time_sync_chronyd {
    # ^? golem.canonical.com           0   9     0     -     +0ns[   +0ns] +/-    0ns
    #
    #
+   # The default output looks like the following, which is difficult to parse in a regex:
+   # $ chronyc -N sources
+   # MS Name/IP address         Stratum Poll Reach LastRx Last sample
+   # ===============================================================================
+   # ^- 1.centos.pool.ntp.org         3  10   377   256    -11ms[  -11ms] +/-  119ms
+   # ^- 2.centos.pool.ntp.org         3  10   377   997   +422us[ +371us] +/-   29ms
+   # ^- 3.centos.pool.ntp.org         1  10   377   989  -1633us[-1684us] +/-  216ms
+   # ^* 4.centos.pool.ntp.org         2  10   377    83   -103us[ -164us] +/- 9104us
+   #
+   # To make the output easier to parse, use the -c parameter for CSV format, which eliminates the header rows
+   # $ chronyc -c sources
+   # ^,-,1.centos.pool.ntp.org,3,10,377,261,-0.010765341,-0.010824408,0.118742160
+   # ^,-,2.centos.pool.ntp.org,3,10,377,1002,0.000421868,0.000371339,0.028858185
+   # ^,-,3.centos.pool.ntp.org,1,10,377,994,-0.001632974,-0.001683594,0.216058344
+   # ^,*,4.centos.pool.ntp.org,2,10,377,88,-0.000103189,-0.000164245,0.009104296
+   #
    print "   found time sync daemon $time_daemon \n" if ($verbose eq "yes");
-   $cmd = "$time_client sources";
+   $cmd = "$time_client -c sources";
    print "   running command: $cmd \n" if ($verbose eq "yes");
    open(IN,"$cmd |");                                                	#open filehandle using command output
    while (<IN>) {                                                    	#read a line from the command output
-      next if (/Number of sources/);					#skip header line
-      next if (/Name/);							#skip header line
-      next if (/=/);							#skip header line
-      s/^\^\*//; 							#get rid of leading ^* characters
-      s/^\^\+//; 							#get rid of leading ^+ characters
-      s/^\^\-//; 							#get rid of leading ^- characters
-      s/^\^\?//; 							#get rid of leading ^? characters
-      s/^ +//;								#get rid of leading spaces
-      @_ = split /\s+/,$_; 						#split $_ on one or more whitespace
-      $time_servers{$_[0]}{name}        = $_[0]; 
-      $time_servers{$_[0]}{stratum}     = $_[1]; 
-      $time_servers{$_[0]}{lastupdate}  = $_[4]; 
-      $time_servers{$_[0]}{offset}      = $_[5]; 
+      next if (/^\^,\-/);						#skip lines beginning with ^- in MS column, refers to Outlier - discarded due to timing error
+      next if (/^\^,\?/);						#skip lines beginning with ^? in MS column, refers to Unreachable - no recent valid response
+      next if (/^\^,x/);						#skip lines beginning with ^x in MS column, refers to Falseticker - rejected as false time source
+      next if (/^\,^#/);						#skip lines beginning with ^# in MS column, refers to Previously selected but not currently used
       #
-      # convert last update from minutes/hours/days to seconds
-      $_ =  $time_servers{$_[0]}{lastupdate};
-      if (/m/) {
-         s/m//;
-         $_ = $_ * 60;							#convert from minutes to seconds
-         $time_servers{$_[0]}{lastupdate} = $_;				#put converted value back into hash
-      }  								#end of if block
-      if (/h/) {
-         s/h//;
-         $_ = $_ * 60*60;						#convert from hours to seconds
-         $time_servers{$_[0]}{lastupdate} = $_;				#put converted value back into hash
-      }  								#end of if block
-      if (/d/) {
-         s/d//;
-         $_ = $_ * 60*60*24;						#convert from days to seconds
-         $time_servers{$_[0]}{lastupdate} = $_;				#put converted value back into hash
-      }  								#end of if block
-      if (/\-/) {							#if the LastUpdate field is "-", change to zero (indicates no connection)
-         s/\-/0/;
-         $time_servers{$_[0]}{lastupdate} = $_;				#put converted value back into hash
-      }  								#end of if block
+      # find the lines beginning with ^* (selected NTP server) or ^+ (candidate NTP server)
       #
-      # reformat the offset value
+      if ( (/^\^,\*/) || (/^\,^\+/) ) {					#we are using CSV format, so beginning of line will be ^,* or ^,+
+         @_ = split /,/,$_; 						#split $_ on comma
+         $time_servers{$_[0]}{name}        = $_[2] if ( $_[2] =~ /[a-zA-Z0-9_\-\.\<\>]+/);
+         $time_servers{$_[0]}{stratum}     = $_[3] if ( $_[3] =~ /[0-9]+/); 
+         $time_servers{$_[0]}{lastupdate}  = $_[6] if ( $_[6] =~ /[0-9]+/);         #measured in seconds
+         $time_servers{$_[0]}{offset}      = $_[7] if ( $_[7] =~ /[0-9_\-\+\.]+/);  #measured in seconds
+      } 
+      #
+      # reformat the offset value from seconds to milliseconds
+      # when using chronyc -c sources, the offset value is shown in seconds
       #
       $_ =  $time_servers{$_[0]}{offset};
       s/\+//;								#get rid of the + sign
       s/\-//;								#get rid of the - sign
-      s/\[.*//;								#get rid of everything after the [
+      $_ = $_ * 1000;							#convert from seconds to milliseconds
+      $_ = sprintf("%.0f", $_);						#truncate to 0 decimal places (ie the nearest millisecond)
+      $time_servers{$_[0]}{offset} = $_;				#put converted value back into hash
       #
-      if (/ns/) {
-         s/ns//;
-         $_ = $_ / 1000 / 1000;						#convert from nanoseconds to milliseconds
-         $_ = sprintf("%.0f", $_);					#truncate to 0 decimal places (ie the nearest millisecond)
-	 $time_servers{$_[0]}{offset} = $_;				#put converted value back into hash
-      }  								#end of if block
-      if (/us/) {
-         s/us//;
-         $_ = $_ / 1000;						#convert from microseconds to milliseconds
-	 $_ = sprintf("%.0f", $_);					#truncate to 0 decimal places (ie the nearest millisecond)
-	 $time_servers{$_[0]}{offset} = $_;				#put converted value back into hash
-      }  								#end of if block
-      if (/ms/) {
-         s/ms//;
-         $_ = $_ * 1;							#convert from milliseconds to milliseconds
-	 $_ = sprintf("%.0f", $_);					#truncate to 0 decimal places (ie the nearest millisecond)
-	 $time_servers{$_[0]}{offset} = $_;				#put converted value back into hash
-      }  								#end of if block
-      if (/s/) {
-         s/s//;
-         $_ = $_ * 1000;						#convert from seconds to milliseconds
-	 $_ = sprintf("%.0f", $_);					#truncate to 0 decimal places (ie the nearest millisecond)
-	 $time_servers{$_[0]}{offset} = $_;				#put converted value back into hash
-      }  								#end of if block
       print "   timeserver:$time_servers{$_[0]}{name} stratum:$time_servers{$_[0]}{stratum} lastupdate:$time_servers{$_[0]}{lastupdate}s offset:$time_servers{$_[0]}{offset}ms \n" if ($verbose eq "yes");
       $common_output_data = "$common_output_data  timeserver:$time_servers{$_[0]}{name} stratum:$time_servers{$_[0]}{stratum} lastupdate:$time_servers{$_[0]}{lastupdate}s offset:$time_servers{$_[0]}{offset}ms";  #add details to the info that will be included in the script output
    } 									#end of while loop
