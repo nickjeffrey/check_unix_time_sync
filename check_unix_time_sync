@@ -676,6 +676,7 @@ sub check_time_sync_chronyd {
    # ^,*,4.centos.pool.ntp.org,2,10,377,88,-0.000103189,-0.000164245,0.009104296
    #
    print "   found time sync daemon $time_daemon \n" if ($verbose eq "yes");
+   my $count = 0;							#initialize counter variable for hash key
    $cmd = "$time_client -c sources";
    print "   running command: $cmd \n" if ($verbose eq "yes");
    open(IN,"$cmd |");                                                	#open filehandle using command output
@@ -687,26 +688,30 @@ sub check_time_sync_chronyd {
       #
       # find the lines beginning with ^* (selected NTP server) or ^+ (candidate NTP server)
       #
-      if ( (/^\^,\*/) || (/^\,^\+/) ) {					#we are using CSV format, so beginning of line will be ^,* or ^,+
-         @_ = split /,/,$_; 						#split $_ on comma
-         $time_servers{$_[0]}{name}        = $_[2] if ( $_[2] =~ /[a-zA-Z0-9_\-\.\<\>]+/);
-         $time_servers{$_[0]}{stratum}     = $_[3] if ( $_[3] =~ /[0-9]+/); 
-         $time_servers{$_[0]}{lastupdate}  = $_[6] if ( $_[6] =~ /[0-9]+/);         #measured in seconds
-         $time_servers{$_[0]}{offset}      = $_[7] if ( $_[7] =~ /[0-9_\-\+\.]+/);  #measured in seconds
+      #if ( (/^\^,\*/) || (/^\,^\+/) ) {					#we are using CSV format, so beginning of line will be ^,* or ^,+
+         #@_ = split /,/,$_; 						#split $_ on comma
+         #$time_servers{$_[0]}{name}        = $_[2] if ( $_[2] =~ /[a-zA-Z0-9_\-\.\<\>]+/);
+         #$time_servers{$_[0]}{stratum}     = $_[3] if ( $_[3] =~ /[0-9]+/); 
+         #$time_servers{$_[0]}{lastupdate}  = $_[6] if ( $_[6] =~ /[0-9]+/);         #measured in seconds
+         #$time_servers{$_[0]}{offset}      = $_[7] if ( $_[7] =~ /[0-9_\-\+\.]+/);  #measured in seconds
+      #   }
+      if ( /^(\^),([\*\+]),([a-zA-Z0-9_\-\.\<\>]+),([0-9]+),([0-9]+),([0-9]+),([0-9]+),([0-9\.\+\-]+),/ ) {
+         print "   CSV command output: $_" if ($verbose eq "yes");
+
+         $count++;							#increment counter variable used as hash key
+         $time_servers{$count}{name}        = $3;
+         $time_servers{$count}{stratum}     = $4; 
+         $time_servers{$count}{lastupdate}  = $7;  			#measured in seconds
+         $time_servers{$count}{offset}      = $8;  			#measured in seconds
+         #
+         # offset may have a leading negative sign, multiply by -1 to turn into absolute value
+         $time_servers{$count}{offset} = $time_servers{$count}{offset} * -1 if ($time_servers{$count}{offset} < 0);
+         $time_servers{$count}{offset} = $time_servers{$count}{offset} * 1000;			# convert offset from seconds to millseconds
+         $time_servers{$count}{offset} = sprintf("%.0f", $time_servers{$count}{offset});	#truncate to 0 decimal places (ie the nearest millisecond)
+         # 
+         print "   timeserver:$time_servers{$count}{name} stratum:$time_servers{$count}{stratum} lastupdate:$time_servers{$count}{lastupdate}s offset:$time_servers{$count}{offset}ms \n" if ($verbose eq "yes");
+         $common_output_data = "$common_output_data  timeserver:$time_servers{$count}{name} stratum:$time_servers{$count}{stratum} lastupdate:$time_servers{$count}{lastupdate}s offset:$time_servers{$count}{offset}ms";  #add details to the info that will be included in the script output
       } 
-      #
-      # reformat the offset value from seconds to milliseconds
-      # when using chronyc -c sources, the offset value is shown in seconds
-      #
-      $_ =  $time_servers{$_[0]}{offset};
-      s/\+//;								#get rid of the + sign
-      s/\-//;								#get rid of the - sign
-      $_ = $_ * 1000;							#convert from seconds to milliseconds
-      $_ = sprintf("%.0f", $_);						#truncate to 0 decimal places (ie the nearest millisecond)
-      $time_servers{$_[0]}{offset} = $_;				#put converted value back into hash
-      #
-      print "   timeserver:$time_servers{$_[0]}{name} stratum:$time_servers{$_[0]}{stratum} lastupdate:$time_servers{$_[0]}{lastupdate}s offset:$time_servers{$_[0]}{offset}ms \n" if ($verbose eq "yes");
-      $common_output_data = "$common_output_data  timeserver:$time_servers{$_[0]}{name} stratum:$time_servers{$_[0]}{stratum} lastupdate:$time_servers{$_[0]}{lastupdate}s offset:$time_servers{$_[0]}{offset}ms";  #add details to the info that will be included in the script output
    } 									#end of while loop
 }									#end of subroutine
 
